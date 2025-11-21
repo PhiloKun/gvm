@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// Color codes
+// Colors 定义终端颜色常量
 const (
 	ColorReset  = "\033[0m"
 	ColorRed    = "\033[31m"

@@ -26,7 +26,7 @@ Examples:
 
 For more information, visit: https://github.com/philokun/gvm`,
 	Run: func(cmd *cobra.Command, args []string) {
-		cmd.Help()
+		cmd.Help() // 显示帮助信息
 	},
 }
 
@@ -39,6 +39,6 @@ func Execute() {
 
 func init() {
 	// 移除默认的toggle标志
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-	rootCmd.Flags().MarkHidden("toggle") // 隐藏这个标志，因为我们不需要它
+	// rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	// rootCmd.Flags().MarkHidden("toggle") // 隐藏这个标志，因为我们不需要它
 }

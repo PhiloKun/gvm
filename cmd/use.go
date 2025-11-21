@@ -1,11 +1,11 @@
 package cmd
 
 import (
-	"fmt"
-	"strings"
+    "fmt"
+    "strings"
 
-	"github.com/philokun/gvm/internal/version"
-	"github.com/spf13/cobra"
+    "github.com/philokun/gvm/internal/version"
+    "github.com/spf13/cobra"
 )
 
 // useCmd represents the use command
@@ -32,8 +32,7 @@ This command updates your PATH to use the specified Go version.`,
 			return fmt.Errorf("failed to switch to version %s: %w", versionStr, err)
 		}
 
-		fmt.Printf("Now using Go %s\n", versionStr)
-		fmt.Println("Note: You may need to restart your terminal or run 'source ~/.bashrc' (or equivalent) for the changes to take effect.")
+        fmt.Printf("Now using Go %s\n", versionStr)
 
 		return nil
 	},
