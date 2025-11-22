@@ -3,6 +3,7 @@ package utils
 import (
     "archive/tar"
     "archive/zip"
+    "bufio"
     "compress/gzip"
     "crypto/sha256"
     "encoding/hex"
@@ -13,72 +14,183 @@ import (
     "path/filepath"
     "runtime"
     "strings"
+    "time"
 )
 
-// DownloadFile 下载文件到指定路径
+// DownloadFile 下载文件到指定路径（保持向后兼容）
 func DownloadFile(url, destPath string) error {
-    resp, err := http.Get(url)
-    if err != nil {
-        return fmt.Errorf("failed to download file: %w", err)
-    }
-    defer resp.Body.Close()
+	return DownloadFileWithProgress(url, destPath, 0)
+}
+
+// DownloadFileWithProgress 下载文件到指定路径，带进度显示
+func DownloadFileWithProgress(url, destPath string, expectedSize int64) error {
+	// 优化 HTTP 客户端：使用更激进的设置以提高下载速度
+	transport := &http.Transport{
+		DisableCompression:    true, // 文件已压缩，不需要再次压缩
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:    10,
+		IdleConnTimeout:        90 * time.Second,
+		ResponseHeaderTimeout:  30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		// 禁用 HTTP/2，使用 HTTP/1.1 可能在某些情况下更快
+		ForceAttemptHTTP2: false,
+	}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   0, // 无超时限制，因为文件可能很大
+	}
+	
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	// 设置请求头，优化下载
+	req.Header.Set("User-Agent", "gvm/1.0")
+	req.Header.Set("Accept-Encoding", "identity") // 禁用压缩，因为文件已压缩
+	req.Header.Set("Connection", "keep-alive")     // 保持连接
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to download file: %w", err)
+	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad status: %s", resp.Status)
 	}
 
-    dir := filepath.Dir(destPath)
-    if err := EnsureDir(dir); err != nil {
-        return fmt.Errorf("failed to ensure download dir: %w", err)
-    }
-    out, err := os.CreateTemp(dir, "gvm-download-*")
-    if err != nil {
-        return fmt.Errorf("failed to create temp file: %w", err)
-    }
-    tempName := out.Name()
+	// 获取实际文件大小
+	contentLength := resp.ContentLength
+	if contentLength == -1 && expectedSize > 0 {
+		contentLength = expectedSize
+	}
 
-	// 写入临时文件
-    _, err = io.Copy(out, resp.Body)
-    if err != nil {
-        out.Close()
-        os.Remove(tempName)
-        return fmt.Errorf("failed to save file: %w", err)
-    }
-    if err := out.Sync(); err != nil {
-        out.Close()
-        os.Remove(tempName)
-        return fmt.Errorf("failed to flush file: %w", err)
-    }
-    if err := out.Close(); err != nil {
-        os.Remove(tempName)
-        return fmt.Errorf("failed to close temp file: %w", err)
-    }
-    if FileExists(destPath) {
-        _ = os.Remove(destPath)
-    }
-    if err := os.Rename(tempName, destPath); err != nil {
-        // 回退到复制方案
-        in, errOpen := os.Open(tempName)
-        if errOpen != nil {
-            os.Remove(tempName)
-            return fmt.Errorf("failed to move file: %w", err)
-        }
-        defer in.Close()
-        outFinal, errCreate := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-        if errCreate != nil {
-            os.Remove(tempName)
-            return fmt.Errorf("failed to move file: %w", err)
-        }
-        if _, errCopy := io.Copy(outFinal, in); errCopy != nil {
-            outFinal.Close()
-            os.Remove(tempName)
-            return fmt.Errorf("failed to move file: %w", err)
-        }
-        outFinal.Close()
-        os.Remove(tempName)
-    }
+	dir := filepath.Dir(destPath)
+	if err := EnsureDir(dir); err != nil {
+		return fmt.Errorf("failed to ensure download dir: %w", err)
+	}
+	
+	out, err := os.CreateTemp(dir, "gvm-download-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tempName := out.Name()
+	defer out.Close()
 
-    return nil
+	// 使用 io.CopyBuffer 而不是手动循环，Go 标准库已经高度优化
+	// 使用更大的缓冲区（1MB）以提高速度
+	buf := make([]byte, 1024*1024) // 1MB 缓冲区
+	
+	// 使用带缓冲的写入
+	bufferedOut := bufio.NewWriterSize(out, 4*1024*1024) // 4MB 写入缓冲区
+	defer bufferedOut.Flush()
+	
+	// 创建带进度跟踪的 Reader
+	startTime := time.Now()
+	lastUpdateTime := startTime
+	lastWritten := int64(0)
+	lastProgress := int64(-1)
+	
+	progressReader := &progressReader{
+		reader:        resp.Body,
+		contentLength: contentLength,
+		onProgress: func(written int64) {
+			now := time.Now()
+			if contentLength > 0 {
+				progress := (written * 100) / contentLength
+				elapsed := now.Sub(startTime).Seconds()
+				shouldUpdate := (progress != lastProgress && progress%2 == 0) || 
+				               (now.Sub(lastUpdateTime) >= 500*time.Millisecond)
+				if shouldUpdate && elapsed > 0 {
+					// 计算瞬时速度（最近0.5秒的速度）
+					timeDiff := now.Sub(lastUpdateTime).Seconds()
+					if timeDiff > 0 {
+						recentSpeed := float64(written-lastWritten) / timeDiff
+						
+						fmt.Printf("\rProgress: %d%% (%.2f MB / %.2f MB) - %.2f MB/s", 
+							progress, 
+							float64(written)/(1024*1024), 
+							float64(contentLength)/(1024*1024),
+							recentSpeed/(1024*1024))
+						lastProgress = progress
+						lastUpdateTime = now
+						lastWritten = written
+					}
+				}
+			}
+		},
+	}
+	
+	// 使用 io.CopyBuffer 进行高效复制
+	written, err := io.CopyBuffer(bufferedOut, progressReader, buf)
+	if err != nil {
+		os.Remove(tempName)
+		return fmt.Errorf("failed to download file: %w", err)
+	}
+	
+	// 完成进度显示
+	if contentLength > 0 {
+		elapsed := time.Since(startTime).Seconds()
+		avgSpeed := float64(written) / elapsed
+		fmt.Printf("\rProgress: 100%% (%.2f MB / %.2f MB) - Complete! (%.2f MB/s avg)\n",
+			float64(written)/(1024*1024),
+			float64(contentLength)/(1024*1024),
+			avgSpeed/(1024*1024))
+	}
+	
+	if err := out.Sync(); err != nil {
+		os.Remove(tempName)
+		return fmt.Errorf("failed to flush file: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tempName)
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+	
+	if FileExists(destPath) {
+		_ = os.Remove(destPath)
+	}
+	if err := os.Rename(tempName, destPath); err != nil {
+		// 回退到复制方案
+		in, errOpen := os.Open(tempName)
+		if errOpen != nil {
+			os.Remove(tempName)
+			return fmt.Errorf("failed to move file: %w", err)
+		}
+		defer in.Close()
+		outFinal, errCreate := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if errCreate != nil {
+			os.Remove(tempName)
+			return fmt.Errorf("failed to move file: %w", err)
+		}
+		if _, errCopy := io.Copy(outFinal, in); errCopy != nil {
+			outFinal.Close()
+			os.Remove(tempName)
+			return fmt.Errorf("failed to move file: %w", err)
+		}
+		outFinal.Close()
+		os.Remove(tempName)
+	}
+
+	return nil
+}
+
+// progressReader 包装 io.Reader 以跟踪下载进度
+type progressReader struct {
+	reader        io.Reader
+	contentLength int64
+	written       int64
+	onProgress    func(int64)
+}
+
+func (pr *progressReader) Read(p []byte) (n int, err error) {
+	n, err = pr.reader.Read(p)
+	pr.written += int64(n)
+	if pr.onProgress != nil {
+		pr.onProgress(pr.written)
+	}
+	return n, err
 }
 
 // ExtractTarGz 解压 tar.gz 文件到指定目录

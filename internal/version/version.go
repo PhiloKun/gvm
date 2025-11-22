@@ -3,35 +3,35 @@ package version
 // 包 version 提供了 Go 版本管理的核心功能，包括获取可用版本、安装、卸载和切换版本。
 
 import (
-    "encoding/json"
-    "fmt"
-    "io"
-    "net/http"
-    "os"
-    "os/exec"
-    "path/filepath"
-    "runtime"
-    "strings"
-    "time"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
 
-    "github.com/philokun/gvm/internal/config"
-    "github.com/philokun/gvm/internal/utils"
+	"github.com/philokun/gvm/internal/config"
+	"github.com/philokun/gvm/internal/utils"
 )
 
 const (
-    DefaultInstallDir = ".gvm/versions"
+	DefaultInstallDir = ".gvm/versions"
 )
 
 // getBaseURL 返回下载与版本 JSON 的基址，支持通过环境变量覆盖镜像
 func getBaseURL() string {
-    if v := os.Getenv("GVM_DL_MIRROR"); v != "" {
-        return strings.TrimRight(v, "/")
-    }
-    return "https://go.dev"
+	if v := os.Getenv("GVM_DL_MIRROR"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "https://go.dev"
 }
 
 func getAltBaseURL() string {
-    return "https://golang.google.cn"
+	return "https://golang.google.cn"
 }
 
 // GoVersion 表示一个 Go 版本及其相关文件信息。
@@ -68,55 +68,56 @@ func (vm *VersionManager) GetInstallDir() string {
 
 // GetAvailableVersions 获取 Go 官方提供的可用版本列表。
 func (vm *VersionManager) GetAvailableVersions() ([]GoVersion, error) {
-    client := &http.Client{Timeout: 30 * time.Second}
-    bases := []string{getBaseURL(), getAltBaseURL()}
-    var lastErr error
-    for _, base := range bases {
-        url := fmt.Sprintf("%s/dl/?mode=json", base)
-        for i := 0; i < 3; i++ {
-            resp, err := client.Get(url)
-            if err != nil {
-                lastErr = err
-                time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
-                continue
-            }
-            if resp.StatusCode != http.StatusOK {
-                lastErr = fmt.Errorf("bad status: %s", resp.Status)
-                resp.Body.Close()
-                time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
-                continue
-            }
-            body, err := io.ReadAll(resp.Body)
-            resp.Body.Close()
-            if err != nil {
-                lastErr = err
-                time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
-                continue
-            }
-            var versions []GoVersion
-            if err := json.Unmarshal(body, &versions); err != nil {
-                lastErr = err
-                time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
-                continue
-            }
-            return versions, nil
-        }
-    }
-    return nil, fmt.Errorf("failed to fetch Go versions: %w", lastErr)
+	client := &http.Client{Timeout: 30 * time.Second}
+	// 优先使用中国镜像以提高速度
+	bases := []string{getAltBaseURL(), getBaseURL()}
+	var lastErr error
+	for _, base := range bases {
+		url := fmt.Sprintf("%s/dl/?mode=json&include=all", base)
+		for i := 0; i < 3; i++ {
+			resp, err := client.Get(url)
+			if err != nil {
+				lastErr = err
+				time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
+				continue
+			}
+			if resp.StatusCode != http.StatusOK {
+				lastErr = fmt.Errorf("bad status: %s", resp.Status)
+				resp.Body.Close()
+				time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
+				continue
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				lastErr = err
+				time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
+				continue
+			}
+			var versions []GoVersion
+			if err := json.Unmarshal(body, &versions); err != nil {
+				lastErr = err
+				time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
+				continue
+			}
+			return versions, nil
+		}
+	}
+	return nil, fmt.Errorf("failed to fetch Go versions: %w", lastErr)
 }
 
 // GetLatestStable 返回最新稳定版的版本号（如 go1.21.5）
 func (vm *VersionManager) GetLatestStable() (string, error) {
-    versions, err := vm.GetAvailableVersions()
-    if err != nil {
-        return "", err
-    }
-    for _, v := range versions {
-        if v.Stable {
-            return v.Version, nil
-        }
-    }
-    return "", fmt.Errorf("no stable versions found")
+	versions, err := vm.GetAvailableVersions()
+	if err != nil {
+		return "", err
+	}
+	for _, v := range versions {
+		if v.Stable {
+			return v.Version, nil
+		}
+	}
+	return "", fmt.Errorf("no stable versions found")
 }
 
 // GetInstalledVersions 获取已安装的 Go 版本列表。
@@ -208,89 +209,97 @@ func (vm *VersionManager) InstallVersion(version string) error {
 		return fmt.Errorf("no suitable package found for %s", platform)
 	}
 
-    // 下载并安装（带镜像回退与重试）
-    bases := []string{getBaseURL(), getAltBaseURL()}
-    var downloadURL string
-    var tempFile string
-    var downloaded bool
-    for _, base := range bases {
-        downloadURL = fmt.Sprintf("%s/dl/%s", base, targetFile.Filename)
-        tempFile = filepath.Join(os.TempDir(), targetFile.Filename)
-        var lastErr error
-        for i := 0; i < 3; i++ {
-            fmt.Printf("Downloading %s...\n", targetFile.Filename)
-            if err := utils.DownloadFile(downloadURL, tempFile); err != nil {
-                lastErr = err
-                time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
-                continue
-            }
-            lastErr = nil
-            break
-        }
-        if lastErr == nil {
-            downloaded = true
-            break
-        }
-    }
-    if !downloaded {
-        return fmt.Errorf("failed to download %s from all mirrors", targetFile.Filename)
-    }
-    defer os.Remove(tempFile)
-    installPath := filepath.Join(vm.installDir, version)
+	// 下载并安装（优先使用中国镜像，带镜像回退与重试）
+	// 优先使用中国镜像以提高下载速度
+	bases := []string{getAltBaseURL(), getBaseURL()}
+	var downloadURL string
+	tempFile := filepath.Join(os.TempDir(), targetFile.Filename)
+	var downloaded bool
+	
+	// 显示文件大小信息
+	fileSizeMB := float64(targetFile.Size) / (1024 * 1024)
+	fmt.Printf("Downloading %s (%.2f MB)...\n", targetFile.Filename, fileSizeMB)
+	
+	for _, base := range bases {
+		downloadURL = fmt.Sprintf("%s/dl/%s", base, targetFile.Filename)
+		for i := 0; i < 3; i++ {
+			if i > 0 {
+				fmt.Printf("Retrying download from %s (attempt %d/3)...\n", base, i+1)
+			}
+			if err := utils.DownloadFileWithProgress(downloadURL, tempFile, int64(targetFile.Size)); err != nil {
+				if i < 2 {
+					time.Sleep(time.Duration(i+1) * 500 * time.Millisecond)
+					continue
+				}
+				// 最后一次尝试失败，尝试下一个镜像
+				break
+			}
+			downloaded = true
+			break
+		}
+		if downloaded {
+			break
+		}
+	}
+	if !downloaded {
+		return fmt.Errorf("failed to download %s from all mirrors", targetFile.Filename)
+	}
+	defer os.Remove(tempFile)
+	installPath := filepath.Join(vm.installDir, version)
 
 	// 确保安装目录存在
 	if err := utils.EnsureDir(vm.installDir); err != nil {
 		return fmt.Errorf("failed to create install directory: %w", err)
 	}
 
-    // 下载已完成（上方循环），继续校验与解压
+	// 下载已完成（上方循环），继续校验与解压
 
-    // 校验文件
-    if targetFile.SHA256 != "" {
-        if err := utils.VerifySHA256(tempFile, targetFile.SHA256); err != nil {
-            return fmt.Errorf("failed to verify sha256: %w", err)
-        }
-    }
+	// 校验文件
+	if targetFile.SHA256 != "" {
+		if err := utils.VerifySHA256(tempFile, targetFile.SHA256); err != nil {
+			return fmt.Errorf("failed to verify sha256: %w", err)
+		}
+	}
 
-    // 解压文件（根据扩展名）
-    fmt.Printf("Extracting to %s...\n", installPath)
-    if strings.HasSuffix(strings.ToLower(targetFile.Filename), ".tar.gz") {
-        if err := utils.ExtractTarGz(tempFile, installPath); err != nil {
-            return fmt.Errorf("failed to extract tar.gz: %w", err)
-        }
-    } else if strings.HasSuffix(strings.ToLower(targetFile.Filename), ".zip") {
-        if err := utils.ExtractZip(tempFile, installPath); err != nil {
-            return fmt.Errorf("failed to extract zip: %w", err)
-        }
-    } else {
-        return fmt.Errorf("unsupported package format: %s", targetFile.Filename)
-    }
+	// 解压文件（根据扩展名）
+	fmt.Printf("Extracting to %s...\n", installPath)
+	if strings.HasSuffix(strings.ToLower(targetFile.Filename), ".tar.gz") {
+		if err := utils.ExtractTarGz(tempFile, installPath); err != nil {
+			return fmt.Errorf("failed to extract tar.gz: %w", err)
+		}
+	} else if strings.HasSuffix(strings.ToLower(targetFile.Filename), ".zip") {
+		if err := utils.ExtractZip(tempFile, installPath); err != nil {
+			return fmt.Errorf("failed to extract zip: %w", err)
+		}
+	} else {
+		return fmt.Errorf("unsupported package format: %s", targetFile.Filename)
+	}
 
-    // 安装后验证：读取 VERSION 文件并检查二进制存在
-    verFile := filepath.Join(installPath, "VERSION")
-    b, err := os.ReadFile(verFile)
-    if err != nil {
-        _ = os.RemoveAll(installPath)
-        return fmt.Errorf("validation failed: missing VERSION: %w", err)
-    }
-    installedVer := strings.TrimSpace(string(b))
-    if installedVer != version {
-        _ = os.RemoveAll(installPath)
-        return fmt.Errorf("validation failed: version mismatch: expected %s got %s", version, installedVer)
-    }
-    goBin := filepath.Join(installPath, "bin", "go")
-    if runtime.GOOS == "windows" {
-        goBin = filepath.Join(installPath, "bin", "go.exe")
-    }
-    if _, err := os.Stat(goBin); err != nil {
-        _ = os.RemoveAll(installPath)
-        return fmt.Errorf("validation failed: go binary missing: %w", err)
-    }
+	// 安装后验证：读取 VERSION 文件并检查二进制存在
+	verFile := filepath.Join(installPath, "VERSION")
+	b, err := os.ReadFile(verFile)
+	if err != nil {
+		_ = os.RemoveAll(installPath)
+		return fmt.Errorf("validation failed: missing VERSION: %w", err)
+	}
+	installedVer := strings.TrimSpace(string(b))
+	if installedVer != version {
+		_ = os.RemoveAll(installPath)
+		return fmt.Errorf("validation failed: version mismatch: expected %s got %s", version, installedVer)
+	}
+	goBin := filepath.Join(installPath, "bin", "go")
+	if runtime.GOOS == "windows" {
+		goBin = filepath.Join(installPath, "bin", "go.exe")
+	}
+	if _, err := os.Stat(goBin); err != nil {
+		_ = os.RemoveAll(installPath)
+		return fmt.Errorf("validation failed: go binary missing: %w", err)
+	}
 
-    // 更新配置
-    if err := config.AddVersion(version); err != nil {
-        return fmt.Errorf("failed to update config: %w", err)
-    }
+	// 更新配置
+	if err := config.AddVersion(version); err != nil {
+		return fmt.Errorf("failed to update config: %w", err)
+	}
 
 	return nil
 }
@@ -318,33 +327,33 @@ func (vm *VersionManager) UseVersion(version string) error {
 		return fmt.Errorf("version %s is not installed", version)
 	}
 
-    // 目标二进制路径
-    goBinPath := filepath.Join(vm.installDir, version, "bin")
+	// 目标二进制路径
+	goBinPath := filepath.Join(vm.installDir, version, "bin")
 
 	// 更新配置文件
 	if err := config.SetCurrentVersion(version); err != nil {
 		return fmt.Errorf("failed to update config: %w", err)
 	}
 
-    // 更新 shims 指向选定版本
-    if err := utils.UpdateShims(goBinPath); err != nil {
-        return fmt.Errorf("failed to update shims: %w", err)
-    }
+	// 更新 shims 指向选定版本
+	if err := utils.UpdateShims(goBinPath); err != nil {
+		return fmt.Errorf("failed to update shims: %w", err)
+	}
 
-    // 确保 PATH 包含 shims 目录（一次性）
-    shimsDir, err := utils.GetShimsDir()
-    if err != nil {
-        return err
-    }
-    if runtime.GOOS == "windows" {
-        if err := utils.UpdatePathForWindows(shimsDir); err != nil {
-            return fmt.Errorf("failed to update windows env: %w", err)
-        }
-    } else {
-        if err := utils.UpdatePathInShellConfig(shimsDir); err != nil {
-            return fmt.Errorf("failed to update shell config: %w", err)
-        }
-    }
+	// 确保 PATH 包含 shims 目录（一次性）
+	shimsDir, err := utils.GetShimsDir()
+	if err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		if err := utils.UpdatePathForWindows(shimsDir); err != nil {
+			return fmt.Errorf("failed to update windows env: %w", err)
+		}
+	} else {
+		if err := utils.UpdatePathInShellConfig(shimsDir); err != nil {
+			return fmt.Errorf("failed to update shell config: %w", err)
+		}
+	}
 
 	return nil
 }

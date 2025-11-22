@@ -18,10 +18,9 @@ Features:
   • List installed and available versions
 
 Examples:
-  gvm list                   # List installed versions
+  gvm list                   # List installed versions (current version marked with *)
   gvm install go1.21.5       # Install Go 1.21.5
   gvm use go1.21.5           # Switch to Go 1.21.5
-  gvm current                # Show current version
   gvm available              # List available versions
 
 For more information, visit: https://github.com/philokun/gvm`,

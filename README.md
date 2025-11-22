@@ -69,7 +69,8 @@ gvm use 1.21.5
 
 ### 查看当前版本
 ```bash
-gvm current
+# 使用 list 命令查看，当前版本会用 * 标记
+gvm list
 ```
 
 ### 卸载版本
@@ -81,11 +82,10 @@ gvm uninstall go1.21.5
 
 | 命令 | 描述 |
 |------|------|
-| `gvm list` | 列出已安装的Go版本 |
+| `gvm list` | 列出已安装的Go版本（当前版本用 * 标记） |
 | `gvm available` | 列出可安装的Go版本 |
 | `gvm install <version>` | 安装指定版本的Go |
 | `gvm use <version>` | 切换到指定版本的Go |
-| `gvm current` | 显示当前使用的Go版本 |
 | `gvm uninstall <version>` | 卸载指定版本的Go |
 | `gvm --help` | 显示帮助信息 |
 
@@ -96,11 +96,10 @@ gvm uninstall go1.21.5
 gvm/
 ├── cmd/                    # Cobra命令定义
 │   ├── root.go            # 根命令
-│   ├── list.go            # 列出版本命令
+│   ├── list.go            # 列出版本命令（包含当前版本标记）
 │   ├── install.go         # 安装版本命令
 │   ├── use.go             # 切换版本命令
 │   ├── uninstall.go       # 卸载版本命令
-│   ├── current.go         # 显示当前版本命令
 │   └── available.go       # 显示可用版本命令
 ├── internal/              # 内部模块
 │   ├── version/           # 版本管理核心
